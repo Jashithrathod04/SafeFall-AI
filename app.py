@@ -1,10 +1,31 @@
-import tempfile
+mport tempfile
 import time
 from pathlib import Path
 
 import cv2
-@@ -27,34 +28,452 @@
+import numpy as np
+import streamlit as st
 
+from src.config import (
+    CLASS_NAMES,
+    SEQUENCE_LENGTH,
+)
+
+from src.pose.pose_detector import (
+    PoseDetector
+)
+
+from src.model.predictor import (
+    Predictor
+)
+
+from src.detection.temporal_validator import (
+    TemporalValidator
+)
+
+from src.alerts.alert_manager import (
+    AlertManager
+)
 
 
 # ===========================================================
@@ -12,18 +33,13 @@ import cv2
 # ===========================================================
 
 st.set_page_config(
-    page_title="SafeFall AI",
     page_title="SafeFall AI — Fall Detection",
     page_icon="🛡️",
-    layout="wide"
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 
-# ---------------------------------------------------------
-# HEADER
-# ---------------------------------------------------------
 # ===========================================================
 # DESIGN SYSTEM — TOKENS
 # ===========================================================
@@ -319,13 +335,7 @@ def inject_css() -> None:
         unsafe_allow_html=True,
     )
 
-st.title(
-    "🛡️ SafeFall AI"
-)
 
-st.subheader(
-    "AI-Powered Elderly Fall Detection System"
-)
 def render_vital_line() -> None:
     """Signature ambient element — a looping ECG-style trace."""
     st.markdown(
@@ -408,10 +418,6 @@ def render_activity_card(placeholder, label: str, confidence: float, is_alert_st
         unsafe_allow_html=True,
     )
 
-st.write(
-    "Computer vision + YOLOv8 Pose + "
-    "BiLSTM temporal activity recognition."
-)
 
 def render_idle_activity_card(placeholder) -> None:
     placeholder.markdown(
@@ -455,9 +461,6 @@ def render_result_critical(alert) -> None:
         unsafe_allow_html=True,
     )
 
-# ---------------------------------------------------------
-# LOAD MODELS
-# ---------------------------------------------------------
 
 # ===========================================================
 # RENDER — STATIC CHROME
@@ -474,12 +477,34 @@ render_system_grid()
 
 @st.cache_resource
 def load_system():
-@@ -86,56 +505,112 @@ def load_system():
+
+    pose_detector = PoseDetector()
+
+    predictor = Predictor()
+
+    validator = TemporalValidator()
+
+    alert_manager = AlertManager()
+
+    return (
+        pose_detector,
+        predictor,
+        validator,
+        alert_manager,
+    )
+
+
+try:
+
+    (
+        pose_detector,
+        predictor,
+        validator,
+        alert_manager,
+    ) = load_system()
 
 except Exception as error:
 
-    st.error(
-        "The AI model could not be loaded."
     st.markdown(
         """
         <div class="result-critical">
@@ -496,31 +521,14 @@ except Exception as error:
     st.stop()
 
 
-# ---------------------------------------------------------
-# SIDEBAR
-# ---------------------------------------------------------
 # ===========================================================
 # SIDEBAR — SETTINGS  (unchanged variable: confidence_threshold)
 # ===========================================================
 
-st.sidebar.header(
-    "Monitoring Settings"
-)
 with st.sidebar:
 
-confidence_threshold = st.sidebar.slider(
-    "Fall confidence threshold",
-    0.50,
-    0.99,
-    0.70,
-    0.01
-)
     st.markdown('<span class="sf-panel-label">Monitoring Settings</span>', unsafe_allow_html=True)
 
-st.sidebar.info(
-    "The system uses temporal confirmation "
-    "to reduce false alarms."
-)
     confidence_threshold = st.slider(
         "Fall confidence threshold",
         0.50,
@@ -574,18 +582,15 @@ st.sidebar.info(
         unsafe_allow_html=True,
     )
 
-# ---------------------------------------------------------
 
 # ===========================================================
 # VIDEO INPUT
-# ---------------------------------------------------------
 # ===========================================================
 
 st.markdown('<span class="sf-panel-label">Analyze a Recording</span>', unsafe_allow_html=True)
 
 uploaded_video = st.file_uploader(
     "Upload a surveillance video",
-    type=["avi", "mp4", "mov"]
     type=["avi", "mp4", "mov"],
     label_visibility="collapsed",
 )
@@ -593,14 +598,8 @@ uploaded_video = st.file_uploader(
 
 if uploaded_video is not None:
 
-    st.video(
-        uploaded_video
-    )
     col_video, col_activity = st.columns([1.3, 1], gap="large")
 
-    if st.button(
-        "▶ Analyze Video"
-    ):
     with col_video:
         st.markdown('<span class="sf-panel-label">Source Video</span>', unsafe_allow_html=True)
         st.video(uploaded_video)
@@ -615,13 +614,23 @@ if uploaded_video is not None:
 
         with tempfile.NamedTemporaryFile(
             delete=False,
-@@ -156,10 +631,10 @@ def load_system():
+            suffix=".mp4"
+        ) as temporary:
+
+            temporary.write(
+                uploaded_video.read()
+            )
+
+            video_path = (
+                temporary.name
+            )
+
+        capture = cv2.VideoCapture(
+            video_path
+        )
 
         sequence = []
 
-        prediction_placeholder = (
-            st.empty()
-        )
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         st.markdown('<span class="sf-panel-label">Processing</span>', unsafe_allow_html=True)
 
@@ -629,7 +638,15 @@ if uploaded_video is not None:
         progress = st.progress(0)
 
         frame_count = int(
-@@ -175,6 +650,12 @@ def load_system():
+            capture.get(
+                cv2.CAP_PROP_FRAME_COUNT
+            )
+        )
+
+        if frame_count <= 0:
+            frame_count = 1
+
+        frame_index = 0
 
         detected_events = []
 
@@ -642,28 +659,85 @@ if uploaded_video is not None:
         while True:
 
             success, frame = (
-@@ -218,10 +699,13 @@ def load_system():
+                capture.read()
+            )
+
+            if not success:
+                break
+
+            keypoints = (
+                pose_detector
+                .extract_keypoints(
+                    frame
+                )
+            )
+
+            sequence.append(
+                keypoints
+            )
+
+            if len(sequence) >= SEQUENCE_LENGTH:
+
+                window = np.asarray(
+                    sequence[
+                        -SEQUENCE_LENGTH:
+                    ],
+                    dtype=np.float32
+                )
+
+                result = (
+                    predictor.predict(
+                        window
+                    )
+                )
+
+                label = result[
+                    "label"
+                ]
+
+                confidence = result[
                     "confidence"
                 ]
 
-                prediction_placeholder.metric(
-                    "Current Activity",
                 is_alert_state = confidence >= confidence_threshold
 
                 render_activity_card(
                     activity_placeholder,
                     label,
-                    f"{confidence * 100:.1f}% confidence"
                     confidence,
                     is_alert_state,
                 )
 
                 confirmed = (
-@@ -254,20 +738,41 @@ def load_system():
+                    validator.update(
+                        label,
+                        confidence
+                    )
+                )
+
+                if confirmed:
+
+                    alert = (
+                        alert_manager
+                        .trigger()
+                    )
+
+                    detected_events.append(
+                        alert
+                    )
+
+            frame_index += 1
+
+            progress.progress(
+                min(
+                    frame_index /
+                    frame_count,
+                    1.0
+                )
+            )
 
         capture.release()
 
-        st.divider()
         step_status.markdown(
             '<span class="mono" style="color:var(--emerald); font-size:0.82rem;">✓ Analysis complete</span>',
             unsafe_allow_html=True,
@@ -674,20 +748,10 @@ if uploaded_video is not None:
 
         if detected_events:
 
-            st.error(
-                "🚨 FALL DETECTED"
-            )
-
-            st.write(
-                detected_events[-1]
-            )
             render_result_critical(detected_events[-1])
 
         else:
 
-            st.success(
-                "No confirmed fall detected."
-            )
             render_result_success()
 
 else:
