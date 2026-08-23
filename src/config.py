@@ -1,36 +1,78 @@
 from pathlib import Path
 
+# ---------------------------------------------------------
+# PROJECT PATHS
+# ---------------------------------------------------------
 
-# Project root
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parents[2]
 
-# Main directories
 DATA_DIR = ROOT_DIR / "data"
-MODEL_DIR = ROOT_DIR / "models"
-ASSET_DIR = ROOT_DIR / "assets"
+RAW_DATA_DIR = DATA_DIR / "raw"
+FRAMES_DIR = DATA_DIR / "frames"
+KEYPOINTS_DIR = DATA_DIR / "keypoints"
+PROCESSED_DATA_DIR = DATA_DIR / "processed"
 
+MODEL_DIR = ROOT_DIR / "models" / "activity_model"
+OUTPUT_DIR = ROOT_DIR / "outputs"
 
-# Activity classes required by the assignment
-CLASSES = [
+# ---------------------------------------------------------
+# DATASET
+# ---------------------------------------------------------
+
+CLASS_NAMES = [
     "Fall Detected",
     "Walking",
     "Sitting",
     "Standing",
-    "Normal Activity"
+    "Normal Activity",
 ]
 
+NUM_CLASSES = len(CLASS_NAMES)
 
-# Pose configuration
+# ---------------------------------------------------------
+# POSE
+# ---------------------------------------------------------
+
+POSE_MODEL = "yolov8n-pose.pt"
+
 NUM_KEYPOINTS = 17
 FEATURES_PER_KEYPOINT = 3
 
-# x + y + confidence
+# x, y, confidence
 NUM_FEATURES = NUM_KEYPOINTS * FEATURES_PER_KEYPOINT
 
+# ---------------------------------------------------------
+# VIDEO / TEMPORAL SETTINGS
+# ---------------------------------------------------------
 
-# Temporal sequence
+IMAGE_WIDTH = 224
+IMAGE_HEIGHT = 224
+
 SEQUENCE_LENGTH = 30
+SEQUENCE_STRIDE = 10
 
+# ---------------------------------------------------------
+# TRAINING
+# ---------------------------------------------------------
 
-# Image preprocessing
-IMAGE_SIZE = (224, 224)
+BATCH_SIZE = 32
+EPOCHS = 30
+
+LEARNING_RATE = 1e-3
+
+HIDDEN_SIZE = 128
+NUM_LAYERS = 2
+DROPOUT = 0.3
+
+# ---------------------------------------------------------
+# FALL VALIDATION
+# ---------------------------------------------------------
+
+FALL_CONFIDENCE_THRESHOLD = 0.70
+FALL_CONFIRMATION_WINDOWS = 2
+
+# ---------------------------------------------------------
+# RANDOM SEED
+# ---------------------------------------------------------
+
+RANDOM_SEED = 42
