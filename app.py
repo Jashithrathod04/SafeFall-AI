@@ -6,6 +6,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 import streamlit as st
+from collections import deque
+from threading import Lock
+
+try:
+    from streamlit_webrtc import VideoProcessorBase, WebRtcMode, webrtc_streamer
+    import av
+    WEBRTC_AVAILABLE = True
+except ImportError:
+    WEBRTC_AVAILABLE = False
 
 from src.config import CLASS_NAMES, SEQUENCE_LENGTH
 from src.pose.pose_detector import PoseDetector
@@ -574,10 +583,27 @@ p, label, span {
 }
 
 .stTextInput input, .stNumberInput input {
-    background:rgba(255,255,255,.035) !important;
-    border:1px solid var(--line2) !important;
-    color:var(--text) !important;
+    background:#cbd9d4 !important;
+    border:1px solid rgba(52,211,153,.42) !important;
+    color:#101816 !important;
+    caret-color:#101816 !important;
     border-radius:12px !important;
+    box-shadow:inset 0 1px 2px rgba(0,0,0,.08) !important;
+}
+.stTextInput input::placeholder, .stNumberInput input::placeholder {
+    color:#40534d !important;
+    opacity:1 !important;
+}
+.stTextInput input:focus, .stNumberInput input:focus {
+    background:#e1ebe7 !important;
+    color:#101816 !important;
+    border-color:var(--green) !important;
+    box-shadow:0 0 0 1px rgba(52,211,153,.35), 0 0 22px rgba(52,211,153,.08) !important;
+}
+
+
+.stCheckbox label, .stCheckbox label span {
+    color:var(--text) !important;
 }
 
 [data-testid="stFileUploaderDropzone"] {
@@ -1186,6 +1212,123 @@ def video_analysis():
 
 
 # ============================================================
+# LIVE CAMERA ENGINE
+# ============================================================
+
+if WEBRTC_AVAILABLE:
+    class SafeFallVideoProcessor(VideoProcessorBase):
+        """Runs the real browser camera stream through the SafeFall pipeline."""
+
+        def __init__(self):
+            self.pose_detector, self.predictor, self.validator, self.alert_manager = load_system()
+            self.sequence = deque(maxlen=SEQUENCE_LENGTH)
+            self.frame_count = 0
+            self.last_label = "Waiting for person..."
+            self.last_confidence = 0.0
+            self.last_alert = False
+            self.lock = Lock()
+
+        def recv(self, frame):
+            image = frame.to_ndarray(format="bgr24")
+            self.frame_count += 1
+
+            try:
+                keypoints = self.pose_detector.extract_keypoints(image)
+                self.sequence.append(keypoints)
+
+                if len(self.sequence) >= SEQUENCE_LENGTH:
+                    window = np.asarray(self.sequence, dtype=np.float32)
+                    result = self.predictor.predict(window)
+
+                    label = str(result["label"])
+                    confidence = float(result["confidence"])
+                    confirmed = self.validator.update(label, confidence)
+
+                    with self.lock:
+                        self.last_label = label
+                        self.last_confidence = confidence
+                        self.last_alert = bool(confirmed)
+
+                    # Draw a compact AI status panel directly on the live video.
+                    is_fall = confirmed or (
+                        confidence >= float(st.session_state.get("confidence_threshold", .70))
+                        and "fall" in label.lower()
+                    )
+                    box_color = (70, 70, 248) if is_fall else (52, 211, 153)
+
+                    overlay = image.copy()
+                    cv2.rectangle(overlay, (15, 15), (430, 112), (7, 12, 10), -1)
+                    image = cv2.addWeighted(overlay, 0.78, image, 0.22, 0)
+
+                    cv2.putText(
+                        image,
+                        "SAFEFALL AI  |  LIVE",
+                        (30, 43),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.72,
+                        (235, 245, 241),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        image,
+                        f"{'FALL ALERT' if is_fall else label}  {confidence * 100:.1f}%",
+                        (30, 82),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.62,
+                        box_color,
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+                    if confirmed:
+                        cv2.rectangle(
+                            image,
+                            (0, 0),
+                            (image.shape[1] - 1, image.shape[0] - 1),
+                            (70, 70, 248),
+                            8,
+                        )
+                        cv2.putText(
+                            image,
+                            "FALL CONFIRMED",
+                            (30, image.shape[0] - 35),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.9,
+                            (70, 70, 248),
+                            3,
+                            cv2.LINE_AA,
+                        )
+                else:
+                    # Show sequence warm-up so the user knows the camera is actually processing.
+                    needed = SEQUENCE_LENGTH - len(self.sequence)
+                    cv2.putText(
+                        image,
+                        f"AI WARM-UP  |  {needed} frames remaining",
+                        (25, 45),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.65,
+                        (52, 211, 153),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+            except Exception as exc:
+                cv2.putText(
+                    image,
+                    "VISION ERROR - CHECK CAMERA / MODEL",
+                    (20, 45),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.58,
+                    (70, 70, 248),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+            return av.VideoFrame.from_ndarray(image, format="bgr24")
+
+
+# ============================================================
 # LIVE MONITOR
 # ============================================================
 
@@ -1196,58 +1339,144 @@ def live_monitor():
     <div class="section-head">
       <div>
         <div class="section-title">Live Monitor</div>
-        <div class="section-sub">Real-time camera monitoring interface.</div>
+        <div class="section-sub">Real-time browser camera + SafeFall AI inference.</div>
       </div>
       <span class="online-pill"><span class="pulse"></span>LIVE</span>
     </div>
     """)
 
-    left, right = st.columns([1.5, .8], gap="large")
-
-    with left:
+    if not WEBRTC_AVAILABLE:
         html("""
-        <div class="glass panel" style="min-height:420px">
-          <div style="display:flex;justify-content:space-between;margin-bottom:12px">
-            <span class="small-label">Camera 01 · Primary</span>
-            <span class="status-ok">CONNECTED</span>
-          </div>
-        """)
-        st.info("Connect your live camera stream here. The existing SafeFall inference pipeline currently analyzes uploaded recordings.")
-        html("""
-          <div style="height:250px;border-radius:16px;border:1px solid rgba(255,255,255,.07);
-                      display:flex;align-items:center;justify-content:center;
-                      background:radial-gradient(circle,rgba(52,211,153,.06),transparent 50%);">
-            <div style="text-align:center">
-              <div class="ai-orb"><div class="orb-core"></div></div>
-              <div style="font:600 1rem 'Space Grotesk'">Monitoring ready</div>
-              <div class="muted" style="font-size:.75rem;margin-top:5px">Awaiting camera stream</div>
-            </div>
+        <div class="alert">
+          <div style="font:700 1.15rem 'Space Grotesk'">Camera engine is not installed</div>
+          <div class="muted" style="margin-top:7px">
+            Add <span class="mono">streamlit-webrtc</span> and <span class="mono">av</span>
+            to your requirements.txt, then redeploy.
           </div>
         </div>
         """)
+        return
+
+    objects, error = model_status()
+    if error:
+        html("""
+        <div class="alert">
+          <div style="font:700 1.15rem 'Space Grotesk'">AI model is unavailable</div>
+          <div class="muted" style="margin-top:7px">
+            The camera can connect, but SafeFall cannot run inference until the trained
+            model is available.
+          </div>
+        </div>
+        """)
+        with st.expander("Deployment diagnostic"):
+            st.exception(error)
+        return
+
+    left, right = st.columns([1.45, .75], gap="large")
+
+    with left:
+        html("""
+        <div class="glass panel">
+          <span class="small-label">Camera 01 · Browser webcam</span>
+          <div class="muted" style="font-size:.78rem;margin-bottom:12px">
+            Click START CAMERA and allow browser camera permission.
+            The incoming frames are processed by the SafeFall pose + temporal model.
+          </div>
+        """)
+
+        ctx = webrtc_streamer(
+            key="safefall-live-camera",
+            mode=WebRtcMode.SENDRECV,
+            video_processor_factory=SafeFallVideoProcessor,
+            media_stream_constraints={
+                "video": {
+                    "width": {"ideal": 1280},
+                    "height": {"ideal": 720},
+                    "frameRate": {"ideal": 15, "max": 24},
+                },
+                "audio": False,
+            },
+            async_processing=True,
+        )
+
+        html("</div>")
 
     with right:
         html("""
         <div class="glass panel">
-          <span class="small-label">Real-time AI state</span>
-          <div class="activity">""" + str(st.session_state.last_activity) + """</div>
-          <div class="metric-name">Latest confidence</div>
-          <div class="bar" style="margin-top:8px">
-            <div class="fill" style="width:""" + str(min(st.session_state.last_confidence * 100,100)) + """%"></div>
+          <span class="small-label">Camera status</span>
+          <div class="status-row">
+            <span>Browser camera</span>
+            <span class="status-ok">READY</span>
           </div>
-          <div class="status-row" style="margin-top:18px"><span>Vision engine</span><span class="status-ok">READY</span></div>
-          <div class="status-row"><span>Temporal model</span><span class="status-ok">READY</span></div>
-          <div class="status-row"><span>Alert engine</span><span class="status-ok">ARMED</span></div>
+          <div class="status-row">
+            <span>Vision engine</span>
+            <span class="status-ok">READY</span>
+          </div>
+          <div class="status-row">
+            <span>Temporal model</span>
+            <span class="status-ok">READY</span>
+          </div>
+          <div class="status-row">
+            <span>Alert engine</span>
+            <span class="status-ok">ARMED</span>
+          </div>
         </div>
         """)
 
-    if st.session_state.last_alert:
-        html(f"""
-        <div class="alert" style="margin-top:18px">
-          <div style="font:700 1.15rem 'Space Grotesk'">🔴 Latest alert</div>
-          <div class="mono muted" style="margin-top:8px">{st.session_state.last_alert}</div>
-        </div>
-        """)
+        # The processor object lives inside the WebRTC context.
+        processor = getattr(ctx, "video_processor", None) if ctx else None
+        if processor is not None:
+            with processor.lock:
+                label = processor.last_label
+                confidence = processor.last_confidence
+                alert = processor.last_alert
+
+            html(f"""
+            <div class="glass panel" style="margin-top:18px">
+              <span class="small-label">Live AI output</span>
+              <div class="activity">{'⚠️ ' if alert else '🧍 '}{label}</div>
+              <div class="metric-name" style="margin-bottom:7px">Confidence</div>
+              <div class="bar">
+                <div class="fill {'fill-alert' if alert else ''}" style="width:{min(confidence*100,100):.1f}%"></div>
+              </div>
+              <div class="status-row" style="margin-top:14px">
+                <span>Detection</span>
+                <span class="{'status-bad' if alert else 'status-ok'}">
+                  {'FALL CONFIRMED' if alert else 'MONITORING'}
+                </span>
+              </div>
+            </div>
+            """)
+        else:
+            html("""
+            <div class="glass panel" style="margin-top:18px;text-align:center">
+              <div class="ai-orb"><div class="orb-core"></div></div>
+              <div style="font:600 1rem 'Space Grotesk'">Camera ready</div>
+              <div class="muted" style="font-size:.75rem;margin-top:5px">
+                Start the camera to begin live inference.
+              </div>
+            </div>
+            """)
+
+    if ctx and ctx.state.playing and processor is not None:
+        with processor.lock:
+            alert_now = processor.last_alert
+            label_now = processor.last_label
+            conf_now = processor.last_confidence
+
+        if alert_now:
+            html(f"""
+            <div class="alert" style="margin-top:18px">
+              <div style="font:700 1.2rem 'Space Grotesk'">🔴 FALL CONFIRMED</div>
+              <div class="muted" style="margin-top:7px">
+                Live camera inference detected a confirmed fall sequence.
+              </div>
+              <div class="mono" style="margin-top:10px">
+                {label_now} · {conf_now*100:.1f}% confidence
+              </div>
+            </div>
+            """)
 
 
 # ============================================================
