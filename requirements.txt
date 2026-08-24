@@ -8,3 +8,9 @@ scikit-learn
 matplotlib
 pandas
 Pillow
+streamlit
+opencv-python-headless
+numpy
+pandas
+streamlit-webrtc
+av
